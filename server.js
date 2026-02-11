@@ -3,22 +3,35 @@ const http = require("http");
 const { Server } = require("socket.io");
 const cors = require("cors");
 const mongoose = require("mongoose");
+const bcrypt = require("bcryptjs");
+const jwt = require("jsonwebtoken");
 
 const app = express();
 app.use(cors());
+app.use(express.json());
 
 const server = http.createServer(app);
+const io = new Server(server, { cors: { origin: "*" } });
 
-const io = new Server(server, {
-  cors: { origin: "*" }
-});
+const JWT_SECRET = "supersecretkey123"; // you can move this to env later
 
-// Connect to MongoDB
+// MongoDB Connection
 mongoose.connect(process.env.MONGO_URI)
   .then(() => console.log("MongoDB connected"))
   .catch(err => console.error("MongoDB connection error:", err));
 
-// Message Schema
+/* ================= USER MODEL ================= */
+
+const userSchema = new mongoose.Schema({
+  username: String,
+  email: { type: String, unique: true },
+  password: String
+});
+
+const User = mongoose.model("User", userSchema);
+
+/* ================= MESSAGE MODEL ================= */
+
 const messageSchema = new mongoose.Schema({
   username: String,
   message: String,
@@ -27,18 +40,67 @@ const messageSchema = new mongoose.Schema({
 
 const Message = mongoose.model("Message", messageSchema);
 
+/* ================= AUTH ROUTES ================= */
+
+// Register
+app.post("/register", async (req, res) => {
+  const { username, email, password, confirmPassword } = req.body;
+
+  if (!username || !email || !password || !confirmPassword)
+    return res.status(400).json({ message: "All fields required" });
+
+  if (password !== confirmPassword)
+    return res.status(400).json({ message: "Passwords do not match" });
+
+  const existingUser = await User.findOne({ email });
+  if (existingUser)
+    return res.status(400).json({ message: "Email already exists" });
+
+  const hashedPassword = await bcrypt.hash(password, 10);
+
+  const newUser = new User({
+    username,
+    email,
+    password: hashedPassword
+  });
+
+  await newUser.save();
+
+  res.json({ message: "Registered successfully" });
+});
+
+// Login
+app.post("/login", async (req, res) => {
+  const { email, password } = req.body;
+
+  const user = await User.findOne({ email });
+  if (!user)
+    return res.status(400).json({ message: "Invalid credentials" });
+
+  const validPassword = await bcrypt.compare(password, user.password);
+  if (!validPassword)
+    return res.status(400).json({ message: "Invalid credentials" });
+
+  const token = jwt.sign(
+    { userId: user._id, username: user.username },
+    JWT_SECRET,
+    { expiresIn: "7d" }
+  );
+
+  res.json({ token, username: user.username });
+});
+
+/* ================= SOCKET CHAT ================= */
+
 io.on("connection", async (socket) => {
   console.log("User connected");
 
-  // 🔹 SEND OLD MESSAGES TO NEW USER
   const messages = await Message.find().sort({ createdAt: 1 });
   socket.emit("load messages", messages);
 
-  // 🔹 SAVE & BROADCAST NEW MESSAGE
   socket.on("chat message", async (data) => {
     const newMessage = new Message(data);
     await newMessage.save();
-
     io.emit("chat message", newMessage);
   });
 });
